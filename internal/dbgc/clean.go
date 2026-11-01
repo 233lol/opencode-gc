@@ -26,6 +26,7 @@ type CleanOptions struct {
 	CompactReasoning bool
 	ReasoningCutoff  int64
 	Protected        map[string]bool
+	Force            bool
 
 	DBCacheKeys []string
 
@@ -149,7 +150,7 @@ func (d *DB) applyMutations(ctx context.Context, opts CleanOptions, now time.Tim
 		}
 	}
 	if len(sessionIDs) > 0 {
-		safe, err := safeSessionIDs(ctx, tx, sessionIDs, opts.Protected, now)
+		safe, err := safeSessionIDs(ctx, tx, sessionIDs, opts.Protected, now, opts.Force)
 		if err != nil {
 			return total, err
 		}
@@ -282,8 +283,9 @@ func (d *DB) applyMutations(ctx context.Context, opts CleanOptions, now time.Tim
 }
 
 // safeSessionIDs re-checks the hard 24h floor and protects the running
-// session, guarding against races between scan and clean.
-func safeSessionIDs(ctx context.Context, tx *sql.Tx, ids []string, protected map[string]bool, now time.Time) ([]string, error) {
+// session, guarding against races between scan and clean. force bypasses the
+// 24h floor but never the protection set.
+func safeSessionIDs(ctx context.Context, tx *sql.Tx, ids []string, protected map[string]bool, now time.Time, force bool) ([]string, error) {
 	current := strings.TrimSpace(os.Getenv("OPENCODE_SESSION_ID"))
 	cutoff := now.Add(-24 * time.Hour).UnixMilli()
 	var out []string
@@ -308,7 +310,7 @@ func safeSessionIDs(ctx context.Context, tx *sql.Tx, ids []string, protected map
 			if protected[id] || id == current {
 				continue
 			}
-			if updated < cutoff || (archived != 0 && archived < cutoff) {
+			if force || updated < cutoff || (archived != 0 && archived < cutoff) {
 				out = append(out, id)
 			}
 		}

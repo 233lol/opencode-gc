@@ -245,8 +245,8 @@ func fixture(t *testing.T, now time.Time) string {
 	defer handle.Close()
 
 	stmts := []string{
-		`CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)`,
-		`CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, fork_session_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER)`,
+		`CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, name TEXT DEFAULT '')`,
+		`CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, fork_session_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER, slug TEXT NOT NULL DEFAULT '', title TEXT, directory TEXT NOT NULL DEFAULT '', cost REAL DEFAULT 0 NOT NULL, tokens_input INTEGER DEFAULT 0 NOT NULL, tokens_output INTEGER DEFAULT 0 NOT NULL, tokens_reasoning INTEGER DEFAULT 0 NOT NULL, tokens_cache_read INTEGER DEFAULT 0 NOT NULL, tokens_cache_write INTEGER DEFAULT 0 NOT NULL)`,
 		`CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)`,
 		`CREATE TABLE session_part (message_id TEXT NOT NULL, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(message_id, ordinal))`,
 		`CREATE TABLE blob (hash TEXT PRIMARY KEY, bytes INTEGER NOT NULL, data BLOB NOT NULL)`,
@@ -278,15 +278,15 @@ func fixture(t *testing.T, now time.Time) string {
 		}
 	}
 
-	exec(`INSERT INTO project VALUES ('p_old','C:/old',?,?)`, ms(60*day), ms(60*day))
-	exec(`INSERT INTO project VALUES ('p_live','C:/live',?,?)`, ms(120*day), ms(day))
-	exec(`INSERT INTO project VALUES ('p_cur','C:/cur',?,?)`, ms(120*day), ms(day))
+	exec(`INSERT INTO project VALUES ('p_old','C:/old',?,?,'')`, ms(60*day), ms(60*day))
+	exec(`INSERT INTO project VALUES ('p_live','C:/live',?,?,'')`, ms(120*day), ms(day))
+	exec(`INSERT INTO project VALUES ('p_cur','C:/cur',?,?,'')`, ms(120*day), ms(day))
 
-	exec(`INSERT INTO session_v2 VALUES ('ses_del','p_live',NULL,NULL,?,?,0)`, ms(120*day), ms(90*day))
-	exec(`INSERT INTO session_v2 VALUES ('ses_keep','p_live',NULL,NULL,?,?,0)`, ms(60*day), ms(45*day))
-	exec(`INSERT INTO session_v2 VALUES ('ses_arch','p_live',NULL,NULL,?,?,?)`, ms(120*day), ms(45*day), ms(90*day))
-	exec(`INSERT INTO session_v2 VALUES ('ses_new','p_live',NULL,NULL,?,?,0)`, ms(time.Hour), ms(time.Hour))
-	exec(`INSERT INTO session_v2 VALUES ('ses_current','p_cur',NULL,NULL,?,?,0)`, ms(120*day), ms(90*day))
+	exec(`INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, time_created, time_updated, time_archived) VALUES ('ses_del','p_live',NULL,NULL,?,?,0)`, ms(120*day), ms(90*day))
+	exec(`INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, time_created, time_updated, time_archived) VALUES ('ses_keep','p_live',NULL,NULL,?,?,0)`, ms(60*day), ms(45*day))
+	exec(`INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, time_created, time_updated, time_archived) VALUES ('ses_arch','p_live',NULL,NULL,?,?,?)`, ms(120*day), ms(45*day), ms(90*day))
+	exec(`INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, time_created, time_updated, time_archived) VALUES ('ses_new','p_live',NULL,NULL,?,?,0)`, ms(time.Hour), ms(time.Hour))
+	exec(`INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, time_created, time_updated, time_archived) VALUES ('ses_current','p_cur',NULL,NULL,?,?,0)`, ms(120*day), ms(90*day))
 
 	exec(`INSERT INTO session_message VALUES ('m_del','ses_del','assistant',?,?)`, ms(100*day), reasoning)
 	exec(`INSERT INTO session_message VALUES ('m_keep','ses_keep','assistant',?,?)`, ms(45*day), reasoning)

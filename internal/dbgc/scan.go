@@ -16,6 +16,7 @@ import (
 // Project is a row from the project table.
 type Project struct {
 	ID       string
+	Name     string
 	Worktree string
 	Created  int64
 }
@@ -26,46 +27,55 @@ type Session struct {
 	ProjectID string
 	ParentID  string
 	ForkID    string
+	Slug      string
+	Title     string
+	Directory string
 	Created   int64
 	Updated   int64
 	Archived  int64
+	Cost      float64
+	Tokens    int64
 }
 
-// Snapshot is an in-memory view of the rows needed for planning.
-type Snapshot struct {
+// Meta is the session/project graph and the protection set.
+type Meta struct {
 	Projects          map[string]Project
 	Sessions          map[string]Session
 	Children          map[string][]string
 	Protected         map[string]bool
 	ProtectedProjects map[string]bool
-	Refs              *fsgc.RefIndex
 }
 
-// LoadSnapshot loads projects, sessions, protection info and file references.
-func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
+// Snapshot is Meta plus the file references used by filesystem cleanup.
+type Snapshot struct {
+	*Meta
+	Refs *fsgc.RefIndex
+}
+
+// LoadMeta loads projects, sessions and protection info.
+func LoadMeta(ctx context.Context, d *DB) (*Meta, error) {
 	if err := d.CheckV2(ctx); err != nil {
 		return nil, err
 	}
-	s := &Snapshot{
+	m := &Meta{
 		Projects:          make(map[string]Project),
 		Sessions:          make(map[string]Session),
 		Children:          make(map[string][]string),
 		Protected:         make(map[string]bool),
 		ProtectedProjects: make(map[string]bool),
-		Refs:              fsgc.NewRefIndex(),
 	}
 
-	rows, err := d.sql.QueryContext(ctx, `SELECT id, worktree, time_created FROM project`)
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, coalesce(name,''), worktree, time_created FROM project`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.Worktree, &p.Created); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Worktree, &p.Created); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		s.Projects[p.ID] = p
+		m.Projects[p.ID] = p
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -75,20 +85,30 @@ func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
 
 	rows, err = d.sql.QueryContext(ctx, `
 		SELECT id, project_id, coalesce(parent_id,''), coalesce(fork_session_id,''),
-		       time_created, time_updated, coalesce(time_archived,0)
+		       slug, coalesce(title,''), directory,
+		       time_created, time_updated, coalesce(time_archived,0),
+		       coalesce(cost,0),
+		       coalesce(tokens_input,0) + coalesce(tokens_output,0) +
+		       coalesce(tokens_reasoning,0) + coalesce(tokens_cache_read,0) +
+		       coalesce(tokens_cache_write,0)
 		FROM session_v2`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var x Session
-		if err := rows.Scan(&x.ID, &x.ProjectID, &x.ParentID, &x.ForkID, &x.Created, &x.Updated, &x.Archived); err != nil {
+		if err := rows.Scan(
+			&x.ID, &x.ProjectID, &x.ParentID, &x.ForkID,
+			&x.Slug, &x.Title, &x.Directory,
+			&x.Created, &x.Updated, &x.Archived,
+			&x.Cost, &x.Tokens,
+		); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		s.Sessions[x.ID] = x
+		m.Sessions[x.ID] = x
 		if x.ParentID != "" {
-			s.Children[x.ParentID] = append(s.Children[x.ParentID], x.ID)
+			m.Children[x.ParentID] = append(m.Children[x.ParentID], x.ID)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -101,8 +121,8 @@ func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
 	// descendants (subagent sessions).
 	if current := strings.TrimSpace(os.Getenv("OPENCODE_SESSION_ID")); current != "" {
 		for id := current; id != ""; {
-			s.Protected[id] = true
-			next := s.Sessions[id]
+			m.Protected[id] = true
+			next := m.Sessions[id]
 			if next.ID == "" || next.ParentID == id {
 				break
 			}
@@ -112,9 +132,9 @@ func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
 		for len(queue) > 0 {
 			id := queue[0]
 			queue = queue[1:]
-			for _, child := range s.Children[id] {
-				if !s.Protected[child] {
-					s.Protected[child] = true
+			for _, child := range m.Children[id] {
+				if !m.Protected[child] {
+					m.Protected[child] = true
 					queue = append(queue, child)
 				}
 			}
@@ -123,20 +143,30 @@ func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
 
 	// Protect the project that contains the current working directory.
 	if wd, err := os.Getwd(); err == nil {
-		for _, p := range s.Projects {
+		for _, p := range m.Projects {
 			if samePath(p.Worktree, wd) {
-				s.ProtectedProjects[p.ID] = true
+				m.ProtectedProjects[p.ID] = true
 			}
 		}
 	}
 
-	if err := s.loadFileRefs(ctx, d); err != nil {
+	return m, nil
+}
+
+// LoadSnapshot loads Meta plus file references.
+func LoadSnapshot(ctx context.Context, d *DB) (*Snapshot, error) {
+	meta, err := LoadMeta(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	s := &Snapshot{Meta: meta, Refs: fsgc.NewRefIndex()}
+	if err := loadFileRefs(ctx, d, s.Refs); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Snapshot) loadFileRefs(ctx context.Context, d *DB) error {
+func loadFileRefs(ctx context.Context, d *DB, refs *fsgc.RefIndex) error {
 	queries := []string{}
 	if d.HasTable("session_message") {
 		queries = append(queries, `SELECT data FROM session_message WHERE data LIKE '%sh_%' OR data LIKE '%tool-output%'`)
@@ -155,7 +185,7 @@ func (s *Snapshot) loadFileRefs(ctx context.Context, d *DB) error {
 				rows.Close()
 				return err
 			}
-			extractRefs(data, s.Refs)
+			extractRefs(data, refs)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()

@@ -237,7 +237,12 @@ func WriteJSON(w io.Writer, r Report) error {
 	if r.Errors == nil {
 		r.Errors = []string{}
 	}
+	return WriteJSONValue(w, r)
+}
+
+// WriteJSONValue writes any value as indented JSON.
+func WriteJSONValue(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(r)
+	return enc.Encode(v)
 }

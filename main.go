@@ -14,14 +14,14 @@ import (
 	"opencode-gc/internal/report"
 )
 
-const version = "0.2.1"
+const version = "0.3.0"
 
 type pathOpts struct {
 	DataDir  string `arg:"--data-dir" placeholder:"PATH" help:"覆盖 OpenCode data 目录"`
 	TmpDir   string `arg:"--tmp-dir" placeholder:"PATH" help:"覆盖 OpenCode tmp 目录"`
 	DBPath   string `arg:"--db" placeholder:"PATH" help:"覆盖 opencode.db 路径"`
 	JSON     bool   `arg:"--json" help:"输出 JSON"`
-	Verbose  bool   `arg:"-v,--verbose" help:"显示更多待删除样本"`
+	Verbose  bool   `arg:"-v,--verbose" help:"显示更多明细"`
 	NoDetect bool   `arg:"--no-detect" help:"不调用 opencode debug paths，直接使用默认路径"`
 }
 
@@ -74,11 +74,37 @@ type backupCmd struct {
 	Out string `arg:"--out" placeholder:"PATH" help:"备份文件路径"`
 }
 
+type sessionsListCmd struct {
+	pathOpts
+	Sort      string       `arg:"--sort" default:"size" placeholder:"FIELD" help:"排序字段：size、messages、updated、created、cost、tokens"`
+	Limit     int          `arg:"--limit" default:"20" help:"显示条数，0 表示全部"`
+	Project   string       `arg:"--project" placeholder:"TEXT" help:"按项目名/worktree/directory/session 字段过滤"`
+	OlderThan age.Duration `arg:"--older-than" placeholder:"DUR" help:"只显示超过该时间未活动的会话"`
+}
+
+type sessionsDeleteCmd struct {
+	pathOpts
+	IDs          []string `arg:"positional,required" placeholder:"SESSION_ID" help:"要删除的 session ID，可写多个"`
+	Apply        bool     `arg:"--apply" help:"真正执行删除；不带时只预览"`
+	Force        bool     `arg:"--force" help:"允许删除 24h 内更新过的会话（受保护会话仍不会删除）"`
+	WithChildren bool     `arg:"--with-children" help:"连同子会话一起删除"`
+	Vacuum       bool     `arg:"--vacuum" help:"删除后执行 checkpoint + VACUUM"`
+	NoBackup     bool     `arg:"--no-backup" help:"写库前不自动备份（不推荐）"`
+	BackupDir    string   `arg:"--backup-dir" placeholder:"PATH" help:"备份目录"`
+	AllowRunning bool     `arg:"--allow-running" help:"服务运行时仍允许写库（不推荐）"`
+}
+
+type sessionsCmd struct {
+	List   *sessionsListCmd   `arg:"subcommand:list" help:"列出会话并按大小等字段排序"`
+	Delete *sessionsDeleteCmd `arg:"subcommand:delete" help:"按 session ID 定点删除会话"`
+}
+
 type rootArgs struct {
-	Scan   *scanCmd   `arg:"subcommand:scan" help:"扫描并报告垃圾（默认命令）"`
-	Clean  *cleanCmd  `arg:"subcommand:clean" help:"清理垃圾；默认只预览，--apply 执行"`
-	Vacuum *vacuumCmd `arg:"subcommand:vacuum" help:"回收数据库空间（checkpoint + VACUUM）"`
-	Backup *backupCmd `arg:"subcommand:backup" help:"创建一致的数据库备份"`
+	Scan     *scanCmd     `arg:"subcommand:scan" help:"扫描并报告垃圾（默认命令）"`
+	Clean    *cleanCmd    `arg:"subcommand:clean" help:"清理垃圾；默认只预览，--apply 执行"`
+	Sessions *sessionsCmd `arg:"subcommand:sessions" help:"分析会话大小、按 ID 定点删除会话"`
+	Vacuum   *vacuumCmd   `arg:"subcommand:vacuum" help:"回收数据库空间（checkpoint + VACUUM）"`
+	Backup   *backupCmd   `arg:"subcommand:backup" help:"创建一致的数据库备份"`
 }
 
 func (rootArgs) Version() string { return "opencode-gc " + version }
@@ -110,6 +136,10 @@ func main() {
 		opts.Backup = !args.Clean.NoBackup
 		opts.BackupKeep = 3
 		rep = gc.Run(ctx, opts)
+
+	case args.Sessions != nil:
+		runSessions(ctx, args.Sessions)
+		return
 
 	case args.Vacuum != nil:
 		opts := buildOptions("vacuum", args.Vacuum.pathOpts, fileOpts{}, dbOpts{}, "")
@@ -152,13 +182,88 @@ func (r rootArgs) JSONEnabled() bool {
 		return r.Vacuum.JSON
 	case r.Backup != nil:
 		return r.Backup.JSON
+	case r.Sessions != nil:
+		if r.Sessions.List != nil {
+			return r.Sessions.List.JSON
+		}
+		if r.Sessions.Delete != nil {
+			return r.Sessions.Delete.JSON
+		}
 	}
 	return false
 }
 
-func buildOptions(command string, po pathOpts, fo fileOpts, dbo dbOpts, backupDir string) gc.Options {
+func runSessions(ctx context.Context, cmd *sessionsCmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Delete != nil {
+		d := cmd.Delete
+		opts := gc.SessionDeleteOptions{
+			Version:      version,
+			Paths:        resolvePaths(d.pathOpts, d.BackupDir),
+			Now:          time.Now(),
+			IDs:          d.IDs,
+			Apply:        d.Apply,
+			Force:        d.Force,
+			WithChildren: d.WithChildren,
+			Vacuum:       d.Vacuum,
+			Backup:       !d.NoBackup,
+			BackupKeep:   3,
+			AllowRunning: d.AllowRunning,
+			Verbose:      d.Verbose,
+		}
+		res := gc.DeleteSessions(ctx, opts)
+		if d.JSON {
+			if err := report.WriteJSONValue(os.Stdout, res); err != nil {
+				fmt.Fprintln(os.Stderr, "输出 JSON 失败:", err)
+				os.Exit(1)
+			}
+		} else {
+			report.PrintSessionDelete(os.Stdout, res)
+		}
+		if res.ExitCode != 0 {
+			os.Exit(res.ExitCode)
+		}
+		return
+	}
+
+	l := cmd.List
+	if l == nil {
+		l = &sessionsListCmd{Sort: "size", Limit: 20}
+	}
+	opts := gc.SessionListOptions{
+		Version:   version,
+		Paths:     resolvePaths(l.pathOpts, ""),
+		Now:       time.Now(),
+		Sort:      l.Sort,
+		Limit:     l.Limit,
+		Project:   l.Project,
+		OlderThan: l.OlderThan.Duration,
+		Verbose:   l.Verbose,
+	}
+	res := gc.ListSessions(ctx, opts)
+	if l.JSON {
+		if err := report.WriteJSONValue(os.Stdout, res); err != nil {
+			fmt.Fprintln(os.Stderr, "输出 JSON 失败:", err)
+			os.Exit(1)
+		}
+	} else {
+		report.PrintSessionList(os.Stdout, res)
+	}
+	if res.ExitCode != 0 {
+		os.Exit(res.ExitCode)
+	}
+}
+
+func resolvePaths(po pathOpts, backupDir string) paths.Paths {
 	p := paths.Resolve(context.Background(), !po.NoDetect)
 	p.Apply(po.DataDir, po.TmpDir, po.DBPath, backupDir)
+	return p
+}
+
+func buildOptions(command string, po pathOpts, fo fileOpts, dbo dbOpts, backupDir string) gc.Options {
+	p := resolvePaths(po, backupDir)
 	ages := resolveAges(fo, dbo)
 
 	return gc.Options{
