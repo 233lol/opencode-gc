@@ -1,0 +1,6 @@
+opencode-gc.exe
+opencode-gc
+*.db
+*.db-wal
+*.db-shm
+/backups/
